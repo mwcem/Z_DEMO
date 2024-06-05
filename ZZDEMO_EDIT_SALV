@@ -1,0 +1,325 @@
+*&---------------------------------------------------------------------*
+*& Name:  ZZDEMO_EDIT_SALV
+*&---------------------------------------------------------------------*
+REPORT zzdemo_edit_salv NO STANDARD PAGE HEADING LINE-SIZE 133.
+
+*----------------------------------------------------------------------*
+*     Interfacedefinitionen
+*----------------------------------------------------------------------*
+INTERFACE lif_definition.
+
+  TYPES:
+    tty_carrid TYPE RANGE OF s_carr_id,
+    BEGIN OF ty_spfli,
+      carrid   TYPE s_carr_id,
+      connid   TYPE s_conn_id,
+      cityfrom TYPE s_from_cit,
+      cityto   TYPE s_to_city,
+    END   OF ty_spfli,
+    tty_spfli TYPE STANDARD TABLE OF ty_spfli WITH EMPTY KEY.
+
+ENDINTERFACE.
+INTERFACE lif_screen.
+
+  CLASS-DATA:
+    gs_spfli   TYPE spfli. " Für Bildschirm nötig
+
+ENDINTERFACE.
+
+*----------------------------------------------------------------------*
+*     Klassendefinitionen
+*----------------------------------------------------------------------*
+CLASS lcl_ui DEFINITION FINAL.
+
+  PUBLIC SECTION.
+    INTERFACES:
+      lif_screen.
+
+    CLASS-METHODS:
+      get_screen_parms
+        EXPORTING
+          et_carrid TYPE lif_definition=>tty_carrid,
+      pai_ex_reuse
+        IMPORTING
+          iv_ucomm TYPE syst_ucomm.
+
+ENDCLASS.
+CLASS lcl_db DEFINITION FINAL.
+
+  PUBLIC SECTION.
+    METHODS:
+      constructor
+        IMPORTING
+          it_carrid TYPE lif_definition=>tty_carrid OPTIONAL,
+      get_spfli
+        RETURNING
+          VALUE(rt_spfli) TYPE lif_definition=>tty_spfli,
+      update_spfli
+        IMPORTING
+          is_spfli TYPE lif_definition=>ty_spfli,
+      get_dbcnt_chg
+        RETURNING
+          VALUE(rv_dbcnt_chg) TYPE sydbcnt.
+
+  PRIVATE SECTION.
+    DATA:
+      mt_carrid    TYPE lif_definition=>tty_carrid,
+      mv_dbcnt_chg TYPE sydbcnt.
+
+ENDCLASS.
+CLASS lcl_appl DEFINITION FINAL.
+
+  PUBLIC SECTION.
+
+    METHODS:
+      constructor
+        IMPORTING
+          it_carrid TYPE lif_definition=>tty_carrid,
+      get_spfli,
+      build_salv,
+      set_col_editable,
+      display_alv.
+
+  PRIVATE SECTION.
+
+    DATA:
+      mo_db    TYPE REF TO lcl_db,
+      mo_salv  TYPE REF TO cl_salv_table,
+      mt_fcat  TYPE lvc_t_fcat,
+      mt_spfli TYPE lif_definition=>tty_spfli.
+
+ENDCLASS.
+CLASS lcl_report DEFINITION FINAL.
+
+  PUBLIC SECTION.
+    CLASS-METHODS:
+      main,
+      set_spfli
+        IMPORTING
+          it_spfli TYPE lif_definition=>tty_spfli,
+      get_spfli
+        RETURNING
+          VALUE(rt_spfli) TYPE lif_definition=>tty_spfli.
+
+  PRIVATE SECTION.
+    CLASS-DATA:
+      mt_spfli TYPE lif_definition=>tty_spfli.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+*     Selektions-Bildschirm                                            *
+*----------------------------------------------------------------------*
+SELECTION-SCREEN: BEGIN OF  BLOCK b1 WITH FRAME TITLE TEXT-s01.
+SELECT-OPTIONS:   so_carr   FOR   lcl_ui=>lif_screen~gs_spfli-carrid.
+SELECTION-SCREEN: END   OF  BLOCK b1.
+
+*----------------------------------------------------------------------*
+*    START-OF-SELECTION                                                *
+*----------------------------------------------------------------------*
+
+START-OF-SELECTION.
+
+  lcl_report=>main( ).
+
+*----------------------------------------------------------------------*
+*     Klassenimplementierungen
+*----------------------------------------------------------------------*
+CLASS lcl_report IMPLEMENTATION.
+
+  METHOD main.
+
+    " Bildschirmdaten holen
+    lcl_ui=>get_screen_parms( IMPORTING
+                                et_carrid = DATA(lt_carrid) ).
+
+    DATA(lo_appl) = NEW lcl_appl( lt_carrid ).
+
+    " Daten ermitteln
+    lo_appl->get_spfli( ).
+
+    " SALV aufbauen
+    lo_appl->build_salv( ).
+
+    " Spalte editierbar machen
+    lo_appl->set_col_editable( ).
+
+    " SALV anzeigen
+    lo_appl->display_alv( ).
+
+  ENDMETHOD.
+  METHOD set_spfli.
+
+    mt_spfli = it_spfli.
+
+  ENDMETHOD.
+  METHOD get_spfli.
+
+    rt_spfli = mt_spfli.
+
+  ENDMETHOD.
+
+ENDCLASS.
+CLASS lcl_ui IMPLEMENTATION.
+
+  METHOD get_screen_parms.
+
+    et_carrid = so_carr[].
+
+  ENDMETHOD.
+  METHOD pai_ex_reuse.
+
+    CHECK:
+      iv_ucomm = '&DATA_SAVE'.
+
+    " geänderte Tabelle mittels "dirty assign" ermitteln
+    FIELD-SYMBOLS:
+      <lt_new> TYPE lif_definition=>tty_spfli.
+    ASSIGN ('(SAPLSLVC_FULLSCREEN)T_OUTTAB[]') TO <lt_new>.
+
+    " Ursprungs-Tabelle vor Aufruf holen
+    DATA(lt_old) = lcl_report=>get_spfli( ).
+
+    IF lt_old = <lt_new>.
+      MESSAGE 'Keine Änderung - nichts zu sichern'(m01) TYPE 'S'.
+    ELSE.
+      DATA(lo_db) = NEW lcl_db( ).
+
+      " Unterschiede suchen
+      LOOP AT <lt_new> ASSIGNING FIELD-SYMBOL(<ls_new>).
+        ASSIGN lt_old[ connid = <ls_new>-connid
+                       carrid = <ls_new>-carrid ] TO FIELD-SYMBOL(<ls_old>).
+        IF  sy-subrc =  0
+        AND <ls_old> <> <ls_new>.
+
+          " DB-Update durchführen
+          lo_db->update_spfli( <ls_new> ).
+        ENDIF.
+      ENDLOOP.
+
+      MESSAGE |{ 'Es wurden'(m02) } { lo_db->get_dbcnt_chg( ) } { 'Sätze geändert.'(m03) }| TYPE 'S'.
+    ENDIF.
+
+    " geänderte Tabelle ist neue Ursprungs-Tabelle
+    lcl_report=>set_spfli( <lt_new> ).
+
+  ENDMETHOD.
+
+ENDCLASS.
+CLASS lcl_appl IMPLEMENTATION.
+
+  METHOD constructor.
+
+    me->mo_db    = NEW #( it_carrid ).
+
+  ENDMETHOD.
+  METHOD get_spfli.
+
+    me->mt_spfli = mo_db->get_spfli( ).
+    lcl_report=>set_spfli( me->mt_spfli ).
+
+  ENDMETHOD.
+  METHOD build_salv.
+
+    TRY.
+        cl_salv_table=>factory( EXPORTING
+                                  list_display = abap_false
+                                IMPORTING
+                                  r_salv_table = me->mo_salv
+                                CHANGING
+                                  t_table      = me->mt_spfli ).
+
+      CATCH cx_salv_msg.
+        MESSAGE 'Fehler bei SALV-Erstellung'(e01) TYPE 'E'. " Im echten Leben RAISE EXCEPTION
+    ENDTRY.
+
+  ENDMETHOD.
+  METHOD set_col_editable.
+
+    " Feldkatalog holen
+    DATA(lo_columns)      = me->mo_salv->get_columns( ).
+    DATA(lo_aggregations) = me->mo_salv->get_aggregations( ).
+    me->mt_fcat           = cl_salv_controller_metadata=>get_lvc_fieldcatalog( r_columns      = lo_columns
+                                                                               r_aggregations = lo_aggregations ).
+
+    " Feld auf editierbar setzen
+    ASSIGN mt_fcat[ fieldname = 'CITYFROM' ] TO FIELD-SYMBOL(<ls_fcat>).
+    IF sy-subrc = 0.
+      <ls_fcat>-edit = abap_true.
+    ENDIF.
+
+    " Feldkatalog aktualisieren
+    cl_salv_controller_metadata=>set_lvc_fieldcatalog( t_fieldcatalog = me->mt_fcat
+                                                       r_columns      = lo_columns
+                                                       r_aggregations = lo_aggregations ).
+
+  ENDMETHOD.
+  METHOD display_alv.
+
+    DATA(ls_layout) = VALUE lvc_s_layo( zebra   = abap_true
+                                        col_opt = abap_true ).
+
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+      EXPORTING
+        i_callback_program      = sy-repid
+        i_callback_user_command = 'USER_COMMAND' " Aufgerufene Form-Routine zu PAI
+        is_layout_lvc           = ls_layout
+        it_fieldcat_lvc         = me->mt_fcat
+      TABLES
+        t_outtab                = me->mt_spfli
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+    IF sy-subrc <> 0.
+      MESSAGE 'Fehler bei SALV-Display'(e02) TYPE 'E'. " Im echten Leben RAISE EXCEPTION
+    ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.
+CLASS lcl_db IMPLEMENTATION.
+
+  METHOD constructor.
+
+    me->mt_carrid = it_carrid.
+
+  ENDMETHOD.
+  METHOD get_spfli.
+
+    SELECT carrid, connid, cityfrom, cityto
+           FROM spfli
+           INTO TABLE @rt_spfli
+           WHERE carrid IN @me->mt_carrid.
+
+  ENDMETHOD.
+  METHOD update_spfli.
+
+    UPDATE spfli
+           SET cityfrom = @is_spfli-cityfrom
+           WHERE connid = @is_spfli-connid
+             AND carrid = @is_spfli-carrid.
+
+    IF sy-subrc = 0.
+      me->mv_dbcnt_chg = me->mv_dbcnt_chg + 1.
+    ELSE.
+      MESSAGE 'Fehler beim Update der SPFLI'(e03) TYPE 'E'." Im echten Leben RAISE EXCEPTION
+    ENDIF.
+
+  ENDMETHOD.
+  METHOD get_dbcnt_chg.
+
+    rv_dbcnt_chg = me->mv_dbcnt_chg.
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+*     Form-Routinen (geht leider nicht anders)
+*----------------------------------------------------------------------*
+FORM user_command USING iv_ucomm    TYPE syst_ucomm     ##CALLED
+                        is_selfield TYPE slis_selfield  ##NEEDED .
+
+  lcl_ui=>pai_ex_reuse( iv_ucomm ).
+
+ENDFORM.
